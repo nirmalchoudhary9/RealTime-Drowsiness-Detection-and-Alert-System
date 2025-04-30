@@ -29,6 +29,8 @@ This project is a **real-time drowsiness detection system** designed to enhance 
 
 - Python 3.8 or higher
 - A webcam for real-time video capture
+- Install CMake
+- Install Visual C++ Build Tools
 
 ### Installation
 
