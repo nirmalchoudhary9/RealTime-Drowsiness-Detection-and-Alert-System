@@ -187,6 +187,7 @@ import base64
 from scipy.spatial import distance as dist
 import mediapipe as mp
 from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration
+from streamlit_webrtc import webrtc_streamer, WebRtcMode
 
 # ---------------- CONFIG ----------------
 EAR_THRESHOLD = 0.25
