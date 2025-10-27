@@ -506,17 +506,18 @@ BLINK_ALERT_THRESHOLD = 30
 ALERT_WAV = "alert.wav"
 
 # ----------------------------
-# Load alert sound (base64)
+# Load alert sound
 # ----------------------------
 try:
     with open(ALERT_WAV, "rb") as f:
         ALERT_WAV_B64 = base64.b64encode(f.read()).decode()
 except FileNotFoundError:
-    ALERT_WAV_B64 = None
     st.error(f"⚠️ Missing '{ALERT_WAV}'. Please add it to your project folder.")
+    ALERT_WAV_B64 = None
+
 
 def play_alert_html(loop=True):
-    """Return HTML that triggers autoplaying alarm in browser."""
+    """Return HTML for looping audio playback."""
     if not ALERT_WAV_B64:
         return ""
     loop_attr = "loop" if loop else ""
@@ -526,6 +527,7 @@ def play_alert_html(loop=True):
     </audio>
     """
 
+
 # ----------------------------
 # Mediapipe setup
 # ----------------------------
@@ -533,8 +535,9 @@ mp_face_mesh = mp.solutions.face_mesh
 LEFT_EYE_IDX = [33, 160, 158, 133, 153, 144]
 RIGHT_EYE_IDX = [362, 385, 387, 263, 373, 380]
 
+
 # ----------------------------
-# Video processor
+# Drowsiness Processor
 # ----------------------------
 class DrowsinessProcessor(VideoProcessorBase):
     def __init__(self):
@@ -601,6 +604,7 @@ class DrowsinessProcessor(VideoProcessorBase):
             cv2.polylines(img, [left_pts], True, (0, 255, 0), 1)
             cv2.polylines(img, [right_pts], True, (0, 255, 0), 1)
 
+            # ---- Drowsiness detection ----
             if ear < EAR_THRESHOLD:
                 if self.eyes_closed_start_time is None:
                     self.eyes_closed_start_time = time.time()
@@ -613,6 +617,7 @@ class DrowsinessProcessor(VideoProcessorBase):
                 if elapsed > BLINK_MAX_DURATION:
                     self.drowsy_frames += 1
 
+                # Trigger alarm if eyes closed too long
                 if elapsed >= ALARM_TRIGGER_TIME and not self.alarm_on:
                     self.alarm_on = True
                     self.alarm_play_request = True
@@ -626,13 +631,17 @@ class DrowsinessProcessor(VideoProcessorBase):
                     self.alarm_on = False
                     self.alarm_play_request = False
 
-            if time.time() - self.blink_start_time >= 60:
-                self.blink_start_time = time.time()
-                self.blink_count = 0
-
+            # ---- High blink rate alert ----
             if self.blink_count > BLINK_ALERT_THRESHOLD:
                 cv2.putText(img, "YOU ARE FALLING ASLEEP!", (10, 120),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                if not self.alarm_on:
+                    self.alarm_on = True
+                    self.alarm_play_request = True
+            else:
+                if self.alarm_on and ear >= EAR_THRESHOLD:
+                    self.alarm_on = False
+                    self.alarm_play_request = False
 
         with self.lock:
             total = self.total_frames if self.total_frames > 0 else 1
@@ -649,6 +658,7 @@ class DrowsinessProcessor(VideoProcessorBase):
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
+
 # ----------------------------
 # Streamlit UI
 # ----------------------------
@@ -664,29 +674,21 @@ This app monitors your eyes using your webcam and plays an alarm if you stay dro
 
 if "show_feed" not in st.session_state:
     st.session_state["show_feed"] = False
-if "alarm_active" not in st.session_state:
-    st.session_state["alarm_active"] = False
 
-col1, col2, col3 = st.columns([1, 1, 1])
+col1, col2 = st.columns([1, 1])
 with col1:
-    start_btn = st.button("▶ Start Detection")
+    start_btn = st.button("▶️ Start Detection")
 with col2:
-    stop_btn = st.button("⏹ Stop Detection")
-with col3:
-    stop_alarm_btn = st.button("🔇 Stop Alarm")
+    stop_btn = st.button("⏹️ Stop Detection")
 
 if start_btn:
     st.session_state["show_feed"] = True
     st.rerun()
 if stop_btn:
     st.session_state["show_feed"] = False
-    st.session_state["alarm_active"] = False
-    st.rerun()
-if stop_alarm_btn:
-    st.session_state["alarm_active"] = False
     st.rerun()
 
-webrtc_ctx = None
+# ---- Start webcam stream ----
 if st.session_state["show_feed"]:
     webrtc_ctx = webrtc_streamer(
         key="drowsiness",
@@ -697,42 +699,33 @@ if st.session_state["show_feed"]:
         async_processing=True,
     )
 
-metrics_placeholder = st.empty()
-audio_placeholder = st.empty()
+    if webrtc_ctx and webrtc_ctx.video_processor:
+        proc = webrtc_ctx.video_processor
+        metrics_placeholder = st.empty()
+        audio_placeholder = st.empty()
 
-# ----------------------------
-# Safe update loop (main thread)
-# ----------------------------
-if webrtc_ctx and webrtc_ctx.video_processor:
-    proc = webrtc_ctx.video_processor
-    while webrtc_ctx.state.playing:
-        time.sleep(0.3)
-        with proc.lock:
-            total = proc.total_frames if proc.total_frames > 0 else 1
-            drowsiness_percentage = (proc.drowsy_frames / total) * 100
-            blink_count = proc.blink_count
-            ear_val = proc.ear
-            alarm_req = proc.alarm_play_request
-            alarm_on = proc.alarm_on
+        while webrtc_ctx.state.playing and webrtc_ctx.video_processor:
+            with proc.lock:
+                total = proc.total_frames if proc.total_frames > 0 else 1
+                drowsiness_percentage = (proc.drowsy_frames / total) * 100
+                blink_count = proc.blink_count
+                ear_val = proc.ear
+                alarm_req = proc.alarm_play_request
+                alarm_on = proc.alarm_on
 
-        metrics_placeholder.markdown(
-            f"**EAR:** {ear_val:.3f}  \n"
-            f"**Blinks (1m):** {blink_count}  \n"
-            f"**Drowsiness %:** {drowsiness_percentage:.2f}%  \n"
-            f"**Alarm:** {'🚨 ON' if alarm_on else 'OFF'}"
-        )
+            metrics_placeholder.markdown(
+                f"**EAR:** {ear_val:.3f}  \n"
+                f"**Blinks (1m):** {blink_count}  \n"
+                f"**Drowsiness %:** {drowsiness_percentage:.2f}%  \n"
+                f"**Alarm:** {'🚨 ON' if alarm_on else 'OFF'}"
+            )
 
-        # trigger alarm playback safely in main thread
-        if (alarm_req or alarm_on) and ALERT_WAV_B64 and not st.session_state["alarm_active"]:
-            st.session_state["alarm_active"] = True
-            audio_placeholder.markdown(play_alert_html(loop=True), unsafe_allow_html=True)
+            if alarm_req or alarm_on:
+                audio_placeholder.markdown(play_alert_html(loop=True), unsafe_allow_html=True)
+            else:
+                audio_placeholder.empty()
 
-        if not alarm_on and st.session_state["alarm_active"]:
-            st.session_state["alarm_active"] = False
-            audio_placeholder.empty()
+            with proc.lock:
+                proc.alarm_play_request = False
 
-        with proc.lock:
-            proc.alarm_play_request = False
-
-        time.sleep(0.2)
-        st.rerun()
+            time.sleep(0.3)
