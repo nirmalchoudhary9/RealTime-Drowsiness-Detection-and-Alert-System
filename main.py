@@ -720,29 +720,24 @@ with col3:
     reset_btn = st.button("Reset Metrics")
 
 # Hook up button behavior
-processor = None
-if webrtc_ctx.video_processor:
-    processor = webrtc_ctx.video_processor
+# processor = None
+# if webrtc_ctx.video_processor:
+#     processor = webrtc_ctx.video_processor
 
-if start_btn:
-    if webrtc_ctx.state.playing:
-        st.info("Already running.")
-    else:
-        webrtc_ctx.play()
-        if processor:
-            processor.active = True
-    st.experimental_rerun()
+processor = webrtc_ctx.video_processor
 
-if stop_btn:
-    # stop webrtc and pause processing
-    webrtc_ctx.stop()
-    if processor:
-        processor.active = False
-    st.experimental_rerun()
+if start_btn and processor:
+    processor.active = True
+    st.success("Detection started!")
+
+if stop_btn and processor:
+    processor.active = False
+    st.warning("Detection stopped!")
 
 if reset_btn and processor:
     processor.reset_metrics()
-    st.success("Metrics reset.")
+    st.info("Metrics reset.")
+
 
 # Display metrics area that updates while running
 metrics_placeholder = st.empty()
