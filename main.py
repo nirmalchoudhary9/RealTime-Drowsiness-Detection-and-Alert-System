@@ -336,7 +336,7 @@ with col2:
     st.markdown("### Live Camera")
     webrtc_ctx = webrtc_streamer(
         key="drowsiness-demo",
-        mode="SENDRECV",
+        mode=WebRtcMode.SENDRECV,
         rtc_configuration=RTC_CONFIGURATION,
         video_transformer_factory=DrowsinessProcessor,
         media_stream_constraints={"video": True, "audio": False},
