@@ -700,40 +700,78 @@ if st.session_state["show_feed"]:
         async_processing=True,
     )
 
-if webrtc_ctx and webrtc_ctx.video_processor:
+# if webrtc_ctx and webrtc_ctx.video_processor:
+#     proc = webrtc_ctx.video_processor
+#     metrics_placeholder = st.empty()
+#     audio_placeholder = st.empty()
+
+#     def update_metrics():
+#         while True:
+#             time.sleep(0.3)
+#             if not webrtc_ctx.state.playing or not webrtc_ctx.video_processor:
+#                 break
+#             with proc.lock:
+#                 total = proc.total_frames if proc.total_frames > 0 else 1
+#                 drowsiness_percentage = (proc.drowsy_frames / total) * 100
+#                 blink_count = proc.blink_count
+#                 ear_val = proc.ear
+#                 alarm_req = proc.alarm_play_request
+#                 alarm_on = proc.alarm_on
+
+#             metrics_placeholder.markdown(
+#                 f"**EAR:** {ear_val:.3f}  \n"
+#                 f"**Blinks (1m):** {blink_count}  \n"
+#                 f"**Drowsiness %:** {drowsiness_percentage:.2f}%  \n"
+#                 f"**Alarm:** {'🚨 ON' if alarm_on else 'OFF'}"
+#             )
+
+#             # Loop alarm while eyes remain closed
+#             if alarm_req or (alarm_on and st.session_state["alarm_active"]):
+#                 st.session_state["alarm_active"] = True
+#                 audio_placeholder.markdown(play_alert_html(loop=True), unsafe_allow_html=True)
+#             else:
+#                 audio_placeholder.empty()
+#                 st.session_state["alarm_active"] = False
+
+#             with proc.lock:
+#                 proc.alarm_play_request = False
+
+    if webrtc_ctx and webrtc_ctx.video_processor:
     proc = webrtc_ctx.video_processor
     metrics_placeholder = st.empty()
     audio_placeholder = st.empty()
 
-    def update_metrics():
-        while True:
-            time.sleep(0.3)
-            if not webrtc_ctx.state.playing or not webrtc_ctx.video_processor:
-                break
-            with proc.lock:
-                total = proc.total_frames if proc.total_frames > 0 else 1
-                drowsiness_percentage = (proc.drowsy_frames / total) * 100
-                blink_count = proc.blink_count
-                ear_val = proc.ear
-                alarm_req = proc.alarm_play_request
-                alarm_on = proc.alarm_on
+    # Streamlit-safe loop (no threads)
+    while webrtc_ctx.state.playing:
+        time.sleep(0.3)
+        with proc.lock:
+            total = proc.total_frames if proc.total_frames > 0 else 1
+            drowsiness_percentage = (proc.drowsy_frames / total) * 100
+            blink_count = proc.blink_count
+            ear_val = proc.ear
+            alarm_req = proc.alarm_play_request
+            alarm_on = proc.alarm_on
 
-            metrics_placeholder.markdown(
-                f"**EAR:** {ear_val:.3f}  \n"
-                f"**Blinks (1m):** {blink_count}  \n"
-                f"**Drowsiness %:** {drowsiness_percentage:.2f}%  \n"
-                f"**Alarm:** {'🚨 ON' if alarm_on else 'OFF'}"
-            )
+        # Update UI (safe inside Streamlit loop)
+        metrics_placeholder.markdown(
+            f"**EAR:** {ear_val:.3f}  \n"
+            f"**Blinks (1m):** {blink_count}  \n"
+            f"**Drowsiness %:** {drowsiness_percentage:.2f}%  \n"
+            f"**Alarm:** {'🚨 ON' if alarm_on else 'OFF'}"
+        )
 
-            # Loop alarm while eyes remain closed
-            if alarm_req or (alarm_on and st.session_state["alarm_active"]):
-                st.session_state["alarm_active"] = True
-                audio_placeholder.markdown(play_alert_html(loop=True), unsafe_allow_html=True)
-            else:
-                audio_placeholder.empty()
-                st.session_state["alarm_active"] = False
+        # Play looping alarm
+        if (alarm_req or (alarm_on and st.session_state.get('alarm_active', False))) and ALERT_WAV_B64:
+            st.session_state['alarm_active'] = True
+            audio_placeholder.markdown(play_alert_html(loop=True), unsafe_allow_html=True)
+        else:
+            audio_placeholder.empty()
+            st.session_state['alarm_active'] = False
 
-            with proc.lock:
-                proc.alarm_play_request = False
+        with proc.lock:
+            proc.alarm_play_request = False
+
+        st.rerun()
+
 
     threading.Thread(target=update_metrics, daemon=True).start()
