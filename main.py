@@ -327,8 +327,8 @@ st.title("🚗 Real-Time Drowsiness Detection (Streamlit + WebRTC)")
 st.markdown(
     """
     This demo uses **Streamlit WebRTC + MediaPipe** to detect drowsiness in real-time using your webcam.
-    - No device selection required; camera starts automatically.
-    - Click **Start Detection** to begin, **Stop Detection** to end.
+    - Camera starts automatically once you click **Start Detection**.
+    - No manual device selection needed.
     """
 )
 
@@ -340,9 +340,6 @@ with cols[0]:
         video_transformer_factory=DrowsinessTransformer,
         media_stream_constraints={"video": True, "audio": False},
         async_processing=True,
-        # Disable default start/select-device UI:
-        sendback_audio=False,
-        desired_playing_state=False,
     )
 
 with cols[1]:
@@ -352,17 +349,10 @@ with cols[1]:
     blinks_placeholder = st.empty()
     audio_placeholder = st.empty()
 
-# --- Buttons (only two) ---
-col_start, col_stop = st.columns([1, 1])
-start_btn = col_start.button("▶️ Start Detection")
-stop_btn = col_stop.button("⏹ Stop Detection")
-
-if webrtc_ctx.video_transformer:
+# --- Reactive UI ---
+if webrtc_ctx.state.playing and webrtc_ctx.video_transformer:
     transformer = webrtc_ctx.video_transformer
-    if webrtc_ctx.state.playing:
-        status_placeholder.success("🔴 Detection Running")
-    else:
-        status_placeholder.info("⚪ Idle")
+    status_placeholder.success("🟢 Detection Running")
 
     drowsy_placeholder.metric("Drowsiness (%)", f"{transformer.latest_drowsiness:.2f}")
     blinks_placeholder.metric("Blink Count", f"{transformer.latest_blinks}")
@@ -376,17 +366,5 @@ if webrtc_ctx.video_transformer:
     except Exception:
         pass
 
-# --- Start/Stop Handling ---
-if start_btn:
-    if not webrtc_ctx.state.playing:
-        webrtc_ctx.start()
-        st.success("Started detection.")
-    else:
-        st.info("Already running.")
-
-if stop_btn:
-    if webrtc_ctx.state.playing:
-        webrtc_ctx.stop()
-        st.success("Stopped detection.")
-    else:
-        st.info("Was not running.")
+else:
+    status_placeholder.info("⚪ Idle")
