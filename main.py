@@ -186,8 +186,7 @@ import time
 import base64
 from scipy.spatial import distance as dist
 import mediapipe as mp
-from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration
-from streamlit_webrtc import webrtc_streamer, WebRtcMode
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration, WebRtcMode
 
 # ---------------- CONFIG ----------------
 EAR_THRESHOLD = 0.25
@@ -218,6 +217,10 @@ st.markdown(
     """
 )
 
+# Ensure session_state key for toggling detection
+if "run_detection" not in st.session_state:
+    st.session_state.run_detection = False
+
 # Utility: load alarm audio
 def get_audio_data_uri(path):
     try:
@@ -242,6 +245,7 @@ def calculate_ear(eye_pts):
 
 class DrowsinessProcessor(VideoTransformerBase):
     def __init__(self):
+        # MediaPipe face mesh
         self.mp_face_mesh = mp.solutions.face_mesh
         self.face_mesh = self.mp_face_mesh.FaceMesh(
             max_num_faces=1,
@@ -250,6 +254,7 @@ class DrowsinessProcessor(VideoTransformerBase):
             min_tracking_confidence=0.5,
         )
 
+        # Metrics/state
         self.eyes_closed_start_time = None
         self.drowsy_frames = 0
         self.total_frames = 0
@@ -257,28 +262,47 @@ class DrowsinessProcessor(VideoTransformerBase):
         self.blink_start_time = time.time()
         self.blink_in_progress = False
         self.alarm_on = False
+        self.ear = 0.0
 
     def recv(self, frame):
+        """
+        Called for each incoming video frame.
+        Will only run detection when webrtc_ctx.state['run'] is True.
+        """
         img = frame.to_ndarray(format="bgr24")
         rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         results = self.face_mesh.process(rgb)
         h, w = img.shape[:2]
         ear = 0.0
 
-        if results.multi_face_landmarks:
+        # Check run flag from webrtc state (shared dict)
+        run_flag = False
+        try:
+            ctx = self.webrtc_ctx
+            if ctx and hasattr(ctx, "state"):
+                run_flag = bool(ctx.state.get("run", False))
+        except Exception:
+            # If no ctx/state available, default to True (so local testing works)
+            run_flag = st.session_state.get("run_detection", False)
+
+        if results.multi_face_landmarks and run_flag:
             lm = results.multi_face_landmarks[0]
 
             left_eye = np.array([(int(lm.landmark[i].x * w), int(lm.landmark[i].y * h)) for i in LEFT_EYE])
             right_eye = np.array([(int(lm.landmark[i].x * w), int(lm.landmark[i].y * h)) for i in RIGHT_EYE])
 
+            # Visualization
             cv2.polylines(img, [left_eye], True, (0, 255, 0), 1)
             cv2.polylines(img, [right_eye], True, (0, 255, 0), 1)
 
+            # EAR calc
             left_ear = calculate_ear(left_eye)
             right_ear = calculate_ear(right_eye)
             ear = (left_ear + right_ear) / 2.0
+            self.ear = ear
             self.total_frames += 1
 
+            # Drowsiness & blink logic
             if ear < EAR_THRESHOLD:
                 if self.eyes_closed_start_time is None:
                     self.eyes_closed_start_time = time.time()
@@ -294,15 +318,19 @@ class DrowsinessProcessor(VideoTransformerBase):
                 if elapsed >= ALARM_TRIGGER_TIME:
                     self.alarm_on = True
             else:
+                # Eyes open
                 self.eyes_closed_start_time = None
                 self.blink_in_progress = False
                 self.alarm_on = False
 
+            # Reset blink counter every minute
             if time.time() - self.blink_start_time >= 60:
                 self.blink_start_time = time.time()
                 self.blink_count = 0
 
             drowsiness_pct = (self.drowsy_frames / self.total_frames) * 100 if self.total_frames > 0 else 0.0
+
+            # Overlay metrics on frame
             cv2.putText(img, f"Drowsiness: {drowsiness_pct:.2f}%", (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             cv2.putText(img, f"Blinks: {self.blink_count}", (10, 60),
@@ -314,16 +342,38 @@ class DrowsinessProcessor(VideoTransformerBase):
                 cv2.putText(img, "DROWSINESS ALERT!", (10, 140),
                             cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
 
-        else:
-            cv2.putText(img, "No face detected", (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+            # write metrics to webrtc state so main thread can read them
+            try:
+                if ctx and hasattr(ctx, "state"):
+                    ctx.state["alarm"] = bool(self.alarm_on)
+                    ctx.state["ear"] = float(self.ear)
+                    ctx.state["blinks"] = int(self.blink_count)
+                    ctx.state["drowsiness"] = float(drowsiness_pct)
+            except Exception:
+                pass
 
+        else:
+            # If not running detection or no face: annotate and reset alarm state in state dict
+            if not results.multi_face_landmarks:
+                cv2.putText(img, "No face detected", (10, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+
+            # ensure UI sees non-running values
+            try:
+                if hasattr(self, "webrtc_ctx") and self.webrtc_ctx and hasattr(self.webrtc_ctx, "state"):
+                    self.webrtc_ctx.state["alarm"] = False
+            except Exception:
+                pass
+
+        # return processed frame as RGB array
         return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
 
+# --- Layout & Controls ---
 col1, col2 = st.columns([1, 2])
 with col1:
     st.markdown("### Controls")
+    # Buttons toggle session_state flag
     start_button = st.button("Start Detection")
     stop_button = st.button("Stop Detection")
 
@@ -341,44 +391,73 @@ with col2:
         rtc_configuration=RTC_CONFIGURATION,
         video_transformer_factory=DrowsinessProcessor,
         media_stream_constraints={"video": True, "audio": False},
-        async_processing=True,  # ✅ keep this, remove in_live_mode
+        async_processing=True,
     )
 
+# Sync session_state -> webrtc state after component is created
+if webrtc_ctx and hasattr(webrtc_ctx, "state"):
+    # initialize run flag in webrtc state from session_state
+    webrtc_ctx.state.setdefault("run", st.session_state.run_detection)
+
+# Button handling: when user clicks a button, update both session_state and webrtc state
+if start_button:
+    st.session_state.run_detection = True
+    if webrtc_ctx and hasattr(webrtc_ctx, "state"):
+        webrtc_ctx.state["run"] = True
+    st.experimental_rerun()
+
+if stop_button:
+    st.session_state.run_detection = False
+    if webrtc_ctx and hasattr(webrtc_ctx, "state"):
+        webrtc_ctx.state["run"] = False
+    st.experimental_rerun()
+
+# Metrics UI
 metrics_box = st.empty()
 alarm_audio_box = st.empty()
 
-
 def render_metrics():
-    if not webrtc_ctx or not webrtc_ctx.video_transformer:
-        metrics_box.info("Waiting for live video...")
-        return
+    # Prefer reading from shared webrtc state (fast), fallback to processor attrs
+    ear = 0.0
+    blinks = 0
+    drowsiness = 0.0
+    alarm_flag = False
 
-    processor = webrtc_ctx.video_transformer
-    if not processor:
-        metrics_box.info("No video feed yet.")
-        return
-
-    drowsiness = (processor.drowsy_frames / processor.total_frames * 100
-                  if processor.total_frames > 0 else 0.0)
+    if webrtc_ctx and hasattr(webrtc_ctx, "state"):
+        s = webrtc_ctx.state
+        ear = float(s.get("ear", 0.0))
+        blinks = int(s.get("blinks", 0))
+        drowsiness = float(s.get("drowsiness", 0.0))
+        alarm_flag = bool(s.get("alarm", False))
+    else:
+        # fallback if state not ready
+        if webrtc_ctx and getattr(webrtc_ctx, "video_transformer", None):
+            proc = webrtc_ctx.video_transformer
+            ear = getattr(proc, "ear", 0.0)
+            blinks = getattr(proc, "blink_count", 0)
+            drowsiness = (proc.drowsy_frames / proc.total_frames * 100) if getattr(proc, "total_frames", 0) > 0 else 0.0
+            alarm_flag = getattr(proc, "alarm_on", False)
 
     metrics_box.markdown(
         f"""
-        **EAR:** {processor.eyes_closed_start_time if processor.eyes_closed_start_time else 0:.2f}  
-        **Blinks:** {processor.blink_count}  
+        **EAR:** {ear:.3f}  
+        **Blinks (last minute):** {blinks}  
         **Drowsiness %:** {drowsiness:.2f}%  
-        **Alarm:** {'ON' if processor.alarm_on else 'OFF'}
+        **Alarm:** {'ON' if alarm_flag else 'OFF'}
         """
     )
 
-    if processor.alarm_on and ALARM_AUDIO_URI:
+    # Play alarm in browser if set
+    if alarm_flag and ALARM_AUDIO_URI:
+        # autoplaying audio tag (browser autoplay policies may require a user interaction)
         alarm_audio_box.markdown(
-            f'<audio autoplay><source src="{ALARM_AUDIO_URI}" type="audio/wav"></audio>',
+            f'<audio autoplay loop><source src="{ALARM_AUDIO_URI}" type="audio/wav"></audio>',
             unsafe_allow_html=True,
         )
     else:
         alarm_audio_box.empty()
 
-
+# Refresh button to update metrics on-demand (app reruns frequently on interactions anyway)
 refresh = st.button("Refresh metrics")
 if refresh:
     render_metrics()
