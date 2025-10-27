@@ -179,32 +179,34 @@
 
 # app.py
 
+# app.py
 import streamlit as st
 from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration
 import cv2
 import numpy as np
 import mediapipe as mp
-import time
 from scipy.spatial import distance as dist
+import time
 from pathlib import Path
 
 st.set_page_config(page_title="🚗 Drowsiness Detection", layout="wide")
 
-# EAR and timing parameters
+# --- PARAMETERS (same as your original) ---
 EAR_THRESHOLD = 0.25
 ALARM_TRIGGER_TIME = 5.0
 BLINK_MIN_DURATION = 0.1
 BLINK_MAX_DURATION = 0.4
 BLINK_ALERT_THRESHOLD = 30
-ALARM_WAV_PATH = "Alert.wav"
+ALARM_WAV_PATH = "alert.wav"  # put your sound file in repo root if you want audio
 
+# WebRTC STUN (recommended)
 RTC_CONFIGURATION = RTCConfiguration(
     {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
 )
 
 mp_face_mesh = mp.solutions.face_mesh
 
-# EAR calculation
+# --- Helper: EAR calculation (same formula) ---
 def calculate_ear(eye):
     A = dist.euclidean(eye[1], eye[5])
     B = dist.euclidean(eye[2], eye[4])
@@ -212,11 +214,18 @@ def calculate_ear(eye):
     return (A + B) / (2.0 * C) if C != 0 else 0
 
 
+# --- Video transformer using MediaPipe face_mesh ---
 class DrowsinessTransformer(VideoTransformerBase):
     def __init__(self):
+        # MediaPipe face mesh configured for a single face
         self.face_mesh = mp_face_mesh.FaceMesh(
-            max_num_faces=1, refine_landmarks=True, min_detection_confidence=0.5, min_tracking_confidence=0.5
+            max_num_faces=1,
+            refine_landmarks=True,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
         )
+
+        # runtime state (keeps parity with original script)
         self.eyes_closed_start_time = None
         self.drowsy_frames = 0
         self.total_frames = 0
@@ -225,90 +234,120 @@ class DrowsinessTransformer(VideoTransformerBase):
         self.blink_in_progress = False
         self.alarm_on = False
 
+        # latest values exposed to the main thread
         self.latest_drowsiness = 0.0
         self.latest_alarm = False
         self.latest_blinks = 0
 
-        # Mediapipe indexes for eyes
-        self.LEFT_EYE_IDX = [33, 160, 158, 133, 153, 144]
+        # approximate MediaPipe indices matching eye landmarks (6 points per eye)
+        # These indices are chosen to match a typical EAR computation mapping for face_mesh.
+        self.LEFT_EYE_IDX  = [33, 160, 158, 133, 153, 144]
         self.RIGHT_EYE_IDX = [362, 385, 387, 263, 373, 380]
 
     def recv(self, frame):
+        # Convert frame to numpy array (BGR)
         img = frame.to_ndarray(format="bgr24")
         rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
         results = self.face_mesh.process(rgb)
 
         if results.multi_face_landmarks:
+            # process first face only
             face_landmarks = results.multi_face_landmarks[0]
             h, w, _ = img.shape
+            # convert normalized landmarks to pixel coordinates
             landmarks = np.array([[int(p.x * w), int(p.y * h)] for p in face_landmarks.landmark])
 
-            left_eye = landmarks[self.LEFT_EYE_IDX]
-            right_eye = landmarks[self.RIGHT_EYE_IDX]
+            # some safety checks in case landmarks are missing
+            try:
+                left_eye  = landmarks[self.LEFT_EYE_IDX]
+                right_eye = landmarks[self.RIGHT_EYE_IDX]
+            except Exception:
+                # fallback: return frame unchanged
+                return frame.to_ndarray(format="bgr24")
 
-            left_ear = calculate_ear(left_eye)
+            left_ear  = calculate_ear(left_eye)
             right_ear = calculate_ear(right_eye)
             ear = (left_ear + right_ear) / 2.0
 
+            # draw eye contours
             cv2.polylines(img, [left_eye], True, (0, 255, 0), 1)
             cv2.polylines(img, [right_eye], True, (0, 255, 0), 1)
 
+            # drowsiness / blink logic (same thresholds as original)
             if ear < EAR_THRESHOLD:
                 if self.eyes_closed_start_time is None:
                     self.eyes_closed_start_time = time.time()
-                elapsed = time.time() - self.eyes_closed_start_time
 
-                if elapsed > BLINK_MIN_DURATION and elapsed <= BLINK_MAX_DURATION and not self.blink_in_progress:
+                elapsed_time = time.time() - self.eyes_closed_start_time
+
+                # count blink if short closure
+                if elapsed_time > BLINK_MIN_DURATION and elapsed_time <= BLINK_MAX_DURATION and not self.blink_in_progress:
                     self.blink_count += 1
                     self.blink_in_progress = True
 
-                if elapsed > BLINK_MAX_DURATION:
+                # treat long closures as drowsy frames
+                if elapsed_time > BLINK_MAX_DURATION:
                     self.drowsy_frames += 1
 
-                if elapsed >= ALARM_TRIGGER_TIME and not self.alarm_on:
+                # alarm trigger
+                if elapsed_time >= ALARM_TRIGGER_TIME and not self.alarm_on:
                     self.alarm_on = True
             else:
+                # eyes open -> reset blink flags
                 if self.eyes_closed_start_time is not None:
-                    elapsed = time.time() - self.eyes_closed_start_time
-                    if not (elapsed > BLINK_MIN_DURATION and elapsed <= BLINK_MAX_DURATION):
+                    elapsed_time = time.time() - self.eyes_closed_start_time
+                    # ignore natural blinks
+                    if not (elapsed_time > BLINK_MIN_DURATION and elapsed_time <= BLINK_MAX_DURATION):
                         self.eyes_closed_start_time = None
                 self.blink_in_progress = False
                 if self.alarm_on:
                     self.alarm_on = False
 
+            # update counters
             self.total_frames += 1
             drowsiness_percentage = (self.drowsy_frames / self.total_frames) * 100 if self.total_frames > 0 else 0
 
+            # reset blink counter every minute
             now = time.time()
             if now - self.blink_start_time >= 60:
                 self.blink_start_time = now
                 self.blink_count = 0
 
             if self.blink_count > BLINK_ALERT_THRESHOLD:
-                cv2.putText(img, "YOU ARE FALLING ASLEEP!", (10, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                cv2.putText(img, "YOU ARE FALLING ASLEEP!", (10, 140),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
+            # overlay status
             cv2.putText(img, f"Drowsiness: {drowsiness_percentage:.2f}%", (10, 60),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             cv2.putText(img, f"Blinks: {self.blink_count}", (10, 90),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
+            # expose state to main thread
             self.latest_drowsiness = drowsiness_percentage
             self.latest_alarm = self.alarm_on
             self.latest_blinks = self.blink_count
         else:
+            # no face
             self.total_frames += 1
             self.latest_alarm = False
 
-        return frame.from_ndarray(img, format="bgr24")
+        # return frame as VideoFrame
+        return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
 
+# --- UI: same layout as your original script but adapted to webrtc ---
 st.title("🚗 Real-Time Drowsiness Detection (Streamlit + WebRTC)")
-st.markdown("""
-This demo uses `streamlit-webrtc` + `mediapipe` for real-time drowsiness detection via webcam.
-- Works fully on Streamlit Cloud (no `dlib` needed).
-- Detects drowsiness based on Eye Aspect Ratio (EAR).
-""")
+st.markdown(
+    """
+    This demo uses `streamlit-webrtc` + `mediapipe` for browser webcam based drowsiness detection.
+    - Place `alert.wav` in repo root to play an alarm sound in-browser when drowsiness is detected.
+    - Works on Streamlit Cloud (no dlib needed).
+    """
+)
 
+# layout: video on left, status on right
 cols = st.columns([3, 1])
 with cols[0]:
     webrtc_ctx = webrtc_streamer(
@@ -316,7 +355,8 @@ with cols[0]:
         rtc_configuration=RTC_CONFIGURATION,
         video_transformer_factory=DrowsinessTransformer,
         media_stream_constraints={"video": True, "audio": False},
-        async_transform=True,
+        async_processing=True,  # recommended (replaces async_transform)
+        # prevent_reconnect=True,  # optional
     )
 
 with cols[1]:
@@ -326,21 +366,26 @@ with cols[1]:
     blinks_placeholder = st.empty()
     audio_placeholder = st.empty()
 
+# start / stop buttons (centered)
 col_start, col_stop = st.columns(2)
 start_btn = col_start.button("Start Detection")
-stop_btn = col_stop.button("Stop Detection")
+stop_btn  = col_stop.button("Stop Detection")
 
+# Display current transformer metrics if transformer is available
 if webrtc_ctx.video_transformer:
     transformer = webrtc_ctx.video_transformer
 
+    # status: playing or idle
     if webrtc_ctx.state.playing:
         status_placeholder.success("🔴 Detection running")
     else:
         status_placeholder.info("⚪ Idle")
 
+    # metrics
     drowsy_placeholder.metric("Drowsiness (%)", f"{transformer.latest_drowsiness:.2f}")
     blinks_placeholder.metric("Blink Count (minute)", f"{transformer.latest_blinks}")
 
+    # play alarm sound in browser when alarm active
     try:
         if transformer.latest_alarm and Path(ALARM_WAV_PATH).exists():
             st.warning("⚠️ Drowsiness detected! Alarm playing.")
@@ -348,18 +393,27 @@ if webrtc_ctx.video_transformer:
         elif transformer.latest_alarm and not Path(ALARM_WAV_PATH).exists():
             st.warning("⚠️ Drowsiness detected! (No audio file found: alert.wav)")
     except Exception:
+        # avoid crashing if file read fails momentarily
         pass
 
+# Start/Stop button behavior — use webrtc context control methods
 if start_btn:
     if webrtc_ctx.state.playing:
         st.info("Already running.")
     else:
-        webrtc_ctx.start()
-        st.experimental_rerun()
+        try:
+            webrtc_ctx.start()
+        except Exception:
+            # starting may require a rerun, so try to rerun
+            st.experimental_rerun()
 
 if stop_btn:
     if webrtc_ctx.state.playing:
-        webrtc_ctx.stop()
+        try:
+            webrtc_ctx.stop()
+        except Exception:
+            st.experimental_rerun()
         st.success("Stopped detection.")
     else:
         st.info("Was not running.")
+
