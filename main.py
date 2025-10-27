@@ -179,10 +179,6 @@
 
 # app.py
 
-# app.py
-
-
-# app.py
 import streamlit as st
 import cv2
 import numpy as np
@@ -205,7 +201,6 @@ ALARM_FILE = "alert.wav"     # Put alert.wav in repo root
 LEFT_EYE = [33, 160, 158, 133, 153, 144]
 RIGHT_EYE = [362, 385, 387, 263, 373, 380]
 
-# Optional RTC config (leave None to use defaults)
 RTC_CONFIGURATION = RTCConfiguration(
     {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
 )
@@ -222,7 +217,7 @@ st.markdown(
     """
 )
 
-# Utility: load alarm audio as base64 data URI
+# Utility: load alarm audio
 def get_audio_data_uri(path):
     try:
         with open(path, "rb") as f:
@@ -234,21 +229,18 @@ def get_audio_data_uri(path):
 
 ALARM_AUDIO_URI = get_audio_data_uri(ALARM_FILE)
 
-# EAR calculation
+
 def calculate_ear(eye_pts):
-    # eye_pts: Nx2 array of 6 points
     A = dist.euclidean(eye_pts[1], eye_pts[5])
     B = dist.euclidean(eye_pts[2], eye_pts[4])
     C = dist.euclidean(eye_pts[0], eye_pts[3])
     if C == 0:
         return 0.0
-    ear = (A + B) / (2.0 * C)
-    return ear
+    return (A + B) / (2.0 * C)
 
-# Video processor class
+
 class DrowsinessProcessor(VideoTransformerBase):
     def __init__(self):
-        # Mediapipe setup
         self.mp_face_mesh = mp.solutions.face_mesh
         self.face_mesh = self.mp_face_mesh.FaceMesh(
             max_num_faces=1,
@@ -257,7 +249,6 @@ class DrowsinessProcessor(VideoTransformerBase):
             min_tracking_confidence=0.5,
         )
 
-        # State variables (per-session)
         self.eyes_closed_start_time = None
         self.drowsy_frames = 0
         self.total_frames = 0
@@ -266,48 +257,25 @@ class DrowsinessProcessor(VideoTransformerBase):
         self.blink_in_progress = False
         self.alarm_on = False
 
-        # Provide initial values for UI
-        self._init_state_dict()
-
-    def _init_state_dict(self):
-        # webrtc_ctx.state is injected by streamlit-webrtc runtime at runtime.
-        # Here we just set placeholders if available later.
-        pass
-
     def recv(self, frame):
-        """
-        Called for each video frame.
-        """
         img = frame.to_ndarray(format="bgr24")
         rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         results = self.face_mesh.process(rgb)
-
         h, w = img.shape[:2]
         ear = 0.0
 
-        if results.multi_face_landmarks and len(results.multi_face_landmarks) > 0:
+        if results.multi_face_landmarks:
             lm = results.multi_face_landmarks[0]
-            pts = []
-            for idx in LEFT_EYE:
-                lmpt = lm.landmark[idx]
-                pts.append((int(lmpt.x * w), int(lmpt.y * h)))
-            left_eye = np.array(pts, dtype=np.int32)
 
-            pts = []
-            for idx in RIGHT_EYE:
-                lmpt = lm.landmark[idx]
-                pts.append((int(lmpt.x * w), int(lmpt.y * h)))
-            right_eye = np.array(pts, dtype=np.int32)
+            left_eye = np.array([(int(lm.landmark[i].x * w), int(lm.landmark[i].y * h)) for i in LEFT_EYE])
+            right_eye = np.array([(int(lm.landmark[i].x * w), int(lm.landmark[i].y * h)) for i in RIGHT_EYE])
 
-            # draw eye contours
             cv2.polylines(img, [left_eye], True, (0, 255, 0), 1)
             cv2.polylines(img, [right_eye], True, (0, 255, 0), 1)
 
             left_ear = calculate_ear(left_eye)
             right_ear = calculate_ear(right_eye)
             ear = (left_ear + right_ear) / 2.0
-
-            # logic: blink/drowsiness
             self.total_frames += 1
 
             if ear < EAR_THRESHOLD:
@@ -315,8 +283,6 @@ class DrowsinessProcessor(VideoTransformerBase):
                     self.eyes_closed_start_time = time.time()
 
                 elapsed = time.time() - self.eyes_closed_start_time
-
-                # natural blink detection
                 if BLINK_MIN_DURATION < elapsed <= BLINK_MAX_DURATION and not self.blink_in_progress:
                     self.blink_count += 1
                     self.blink_in_progress = True
@@ -324,30 +290,18 @@ class DrowsinessProcessor(VideoTransformerBase):
                 if elapsed > BLINK_MAX_DURATION:
                     self.drowsy_frames += 1
 
-                if elapsed >= ALARM_TRIGGER_TIME and not self.alarm_on:
+                if elapsed >= ALARM_TRIGGER_TIME:
                     self.alarm_on = True
             else:
-                # eyes open
-                if self.eyes_closed_start_time is not None:
-                    elapsed = time.time() - self.eyes_closed_start_time
-                    # if it was within blink bounds, don't count as drowsy
-                    # reset start time
-                    self.eyes_closed_start_time = None
-
-                # reset blink flag
+                self.eyes_closed_start_time = None
                 self.blink_in_progress = False
-                # stop alarm if it was on
                 self.alarm_on = False
 
-            # blink count reset per minute
-            current_time = time.time()
-            if current_time - self.blink_start_time >= 60:
-                self.blink_start_time = current_time
+            if time.time() - self.blink_start_time >= 60:
+                self.blink_start_time = time.time()
                 self.blink_count = 0
 
-            # overlays text
             drowsiness_pct = (self.drowsy_frames / self.total_frames) * 100 if self.total_frames > 0 else 0.0
-
             cv2.putText(img, f"Drowsiness: {drowsiness_pct:.2f}%", (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             cv2.putText(img, f"Blinks: {self.blink_count}", (10, 60),
@@ -355,42 +309,17 @@ class DrowsinessProcessor(VideoTransformerBase):
             cv2.putText(img, f"EAR: {ear:.3f}", (10, 90),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
-            # severe alert overlay
             if self.alarm_on:
                 cv2.putText(img, "DROWSINESS ALERT!", (10, 140),
                             cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
 
-            # write metrics to webrtc state for UI thread
-            # the webrtc context will populate .state automatically on the main thread side
-            try:
-                # this attribute is injected by streamlit-webrtc runtime
-                ctx = self.webrtc_ctx
-                if ctx and hasattr(ctx, "state"):
-                    ctx.state["alarm"] = self.alarm_on
-                    ctx.state["ear"] = float(ear)
-                    ctx.state["blinks"] = int(self.blink_count)
-                    ctx.state["drowsiness"] = float(drowsiness_pct)
-            except Exception:
-                # ignore if not available
-                pass
-
         else:
-            # No face found: annotate
             cv2.putText(img, "No face detected", (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-            # also update metrics to show no face
-            try:
-                ctx = self.webrtc_ctx
-                if ctx and hasattr(ctx, "state"):
-                    ctx.state["alarm"] = False
-                    ctx.state["ear"] = 0.0
-            except Exception:
-                pass
 
-        # return processed frame
         return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-# ----------------- UI / Streamlit main -----------------
+
 col1, col2 = st.columns([1, 2])
 with col1:
     st.markdown("### Controls")
@@ -399,83 +328,58 @@ with col1:
 
     st.markdown("### Alarm sound")
     if ALARM_AUDIO_URI is None:
-        st.warning("alert.wav not found in repo root — alarm will not play. Upload alert.wav.")
+        st.warning("alert.wav not found in repo root — alarm will not play.")
     else:
-        st.write("Alarm file loaded.")
+        st.success("Alarm file loaded.")
 
 with col2:
     st.markdown("### Live Camera")
-    # streamlit-webrtc component
     webrtc_ctx = webrtc_streamer(
         key="drowsiness-demo",
         mode="SENDRECV",
         rtc_configuration=RTC_CONFIGURATION,
         video_transformer_factory=DrowsinessProcessor,
         media_stream_constraints={"video": True, "audio": False},
-        async_processing=True,
-        in_live_mode=True,
+        async_processing=True,  # ✅ keep this, remove in_live_mode
     )
 
-# Start/Stop handling: webrtc component exposes webrtc_ctx.state
-if webrtc_ctx.state is None:
-    # state may initially be None until started
-    pass
-
-# Buttons: start/stop can be used to toggle visibility / restart component
-if start_button:
-    # re-create or just inform user to allow camera if not already
-    st.info("If camera permission prompt appears in your browser, allow it.")
-if stop_button:
-    if webrtc_ctx and webrtc_ctx.video_transformer:
-        webrtc_ctx.video_transformer = None
-    st.success("Stopped detection (if running). To restart, press Start Detection or reload the app.")
-
-# Display live metrics read from the webrtc_ctx.state
 metrics_box = st.empty()
 alarm_audio_box = st.empty()
 
-def render_metrics(ctx):
-    if ctx is None:
-        metrics_box.info("WebRTC component not yet initialized.")
+
+def render_metrics():
+    if not webrtc_ctx or not webrtc_ctx.video_transformer:
+        metrics_box.info("Waiting for live video...")
         return
 
-    state = getattr(ctx, "state", None)
-    if state is None:
-        metrics_box.info("Waiting for video...")
+    processor = webrtc_ctx.video_transformer
+    if not processor:
+        metrics_box.info("No video feed yet.")
         return
 
-    ear = state.get("ear", 0.0)
-    blinks = state.get("blinks", 0)
-    drowsiness = state.get("drowsiness", 0.0)
-    alarm_flag = state.get("alarm", False)
+    drowsiness = (processor.drowsy_frames / processor.total_frames * 100
+                  if processor.total_frames > 0 else 0.0)
 
     metrics_box.markdown(
         f"""
-        **EAR:** {ear:.3f}  
-        **Blinks (last minute):** {blinks}  
+        **EAR:** {processor.eyes_closed_start_time if processor.eyes_closed_start_time else 0:.2f}  
+        **Blinks:** {processor.blink_count}  
         **Drowsiness %:** {drowsiness:.2f}%  
-        **Alarm:** {'ON' if alarm_flag else 'OFF'}
+        **Alarm:** {'ON' if processor.alarm_on else 'OFF'}
         """
     )
 
-    # Play alarm in browser if set
-    if alarm_flag and ALARM_AUDIO_URI:
-        # inject autoplaying audio tag; it will play once triggered
+    if processor.alarm_on and ALARM_AUDIO_URI:
         alarm_audio_box.markdown(
             f'<audio autoplay><source src="{ALARM_AUDIO_URI}" type="audio/wav"></audio>',
             unsafe_allow_html=True,
         )
     else:
-        # clear audio element
         alarm_audio_box.empty()
 
-# Poll the state periodically (Streamlit reruns on interaction; we emulate periodic check with st.button or timer)
-# Use a small placeholder loop triggered by user clicking a 'Refresh metrics' button or rely on Streamlit auto-rerun (we provide a refresh button)
+
 refresh = st.button("Refresh metrics")
 if refresh:
-    render_metrics(webrtc_ctx)
+    render_metrics()
 else:
-    # show once (it will update when component reruns)
-    render_metrics(webrtc_ctx)
-
-
+    render_metrics()
