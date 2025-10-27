@@ -493,23 +493,20 @@ import time
 import base64
 import threading
 
-# ----------------------------
-# Streamlit Page Config
-# ----------------------------
 st.set_page_config(page_title="Real-Time Drowsiness Detection", layout="wide")
 
 # ----------------------------
 # Constants
 # ----------------------------
 EAR_THRESHOLD = 0.25
-ALARM_TRIGGER_TIME = 5  # seconds eyes must remain closed
+ALARM_TRIGGER_TIME = 5
 BLINK_MIN_DURATION = 0.1
 BLINK_MAX_DURATION = 0.4
 BLINK_ALERT_THRESHOLD = 30
 ALERT_WAV = "alert.wav"
 
 # ----------------------------
-# Load alert sound (base64 for browser playback)
+# Load alert sound
 # ----------------------------
 try:
     with open(ALERT_WAV, "rb") as f:
@@ -518,12 +515,25 @@ except FileNotFoundError:
     st.error(f"⚠️ Missing '{ALERT_WAV}'. Please add it to your project folder.")
     ALERT_WAV_B64 = None
 
+
+def play_alert_html():
+    """Return HTML for autoplay audio playback."""
+    if not ALERT_WAV_B64:
+        return ""
+    return f"""
+    <audio autoplay>
+        <source src="data:audio/wav;base64,{ALERT_WAV_B64}" type="audio/wav">
+    </audio>
+    """
+
+
 # ----------------------------
 # Mediapipe setup
 # ----------------------------
 mp_face_mesh = mp.solutions.face_mesh
 LEFT_EYE_IDX = [33, 160, 158, 133, 153, 144]
 RIGHT_EYE_IDX = [362, 385, 387, 263, 373, 380]
+
 
 # ----------------------------
 # Drowsiness Processor
@@ -601,11 +611,14 @@ class DrowsinessProcessor(VideoProcessorBase):
                 if (elapsed > BLINK_MIN_DURATION and elapsed <= BLINK_MAX_DURATION) and not self.blink_in_progress:
                     self.blink_count += 1
                     self.blink_in_progress = True
+
                 if elapsed > BLINK_MAX_DURATION:
                     self.drowsy_frames += 1
+
                 if elapsed >= ALARM_TRIGGER_TIME and not self.alarm_on:
                     self.alarm_on = True
                     self.alarm_play_request = True
+
                 cv2.putText(img, "DROWSINESS ALERT!", (10, 30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
             else:
@@ -628,7 +641,6 @@ class DrowsinessProcessor(VideoProcessorBase):
             drowsiness_percentage = (self.drowsy_frames / total) * 100
             blink_count = self.blink_count
             ear_val = self.ear
-            alarm_flag = self.alarm_on
 
         cv2.putText(img, f"Drowsiness: {drowsiness_percentage:.2f}%", (10, 60),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
@@ -641,7 +653,7 @@ class DrowsinessProcessor(VideoProcessorBase):
 
 
 # ----------------------------
-# WebRTC / Streamlit UI
+# Streamlit UI
 # ----------------------------
 RTC_CONFIGURATION = RTCConfiguration(
     {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
@@ -649,21 +661,15 @@ RTC_CONFIGURATION = RTCConfiguration(
 
 st.title("🚗 Real-Time Drowsiness Detection (WebRTC)")
 st.markdown("""
-Real-time drowsiness detection using your webcam.
-
-**Instructions:**
-- Press **Start Detection** to begin.
-- Press **Stop Detection** to pause & hide webcam.
-- Alarm will sound in browser when eyes stay closed too long.
+This app monitors your eyes in real-time to detect drowsiness using your webcam.  
+🔊 Alarm will sound if your eyes stay closed too long.
 """)
 
-# Manage webcam visibility
 if "show_feed" not in st.session_state:
     st.session_state["show_feed"] = False
-if "alarm_trigger" not in st.session_state:
-    st.session_state["alarm_trigger"] = False
+if "alarm_html" not in st.session_state:
+    st.session_state["alarm_html"] = ""
 
-# Buttons
 col1, col2, col3 = st.columns([1, 1, 2])
 with col1:
     start_btn = st.button("Start Detection")
@@ -672,7 +678,14 @@ with col2:
 with col3:
     reset_btn = st.button("Reset Metrics")
 
-# Webcam feed
+if start_btn:
+    st.session_state["show_feed"] = True
+    st.rerun()
+if stop_btn:
+    st.session_state["show_feed"] = False
+    st.rerun()
+
+# Stream video
 webrtc_ctx = None
 if st.session_state["show_feed"]:
     webrtc_ctx = webrtc_streamer(
@@ -684,33 +697,20 @@ if st.session_state["show_feed"]:
         async_processing=True,
     )
 
-# Button behavior
-if start_btn:
-    st.session_state["show_feed"] = True
-    st.rerun()
-
-if stop_btn:
-    st.session_state["show_feed"] = False
-    st.warning("Detection stopped.")
-    st.rerun()
-
-# Only proceed if camera feed active
 if webrtc_ctx and webrtc_ctx.video_processor:
-    processor = webrtc_ctx.video_processor
-
+    proc = webrtc_ctx.video_processor
     if reset_btn:
-        processor.reset_metrics()
+        proc.reset_metrics()
         st.info("Metrics reset.")
 
-    # Dynamic metrics display
     metrics_placeholder = st.empty()
+    audio_placeholder = st.empty()
 
     def update_metrics():
         while True:
             time.sleep(0.3)
             if not webrtc_ctx.state.playing or not webrtc_ctx.video_processor:
                 break
-            proc = webrtc_ctx.video_processor
             with proc.lock:
                 total = proc.total_frames if proc.total_frames > 0 else 1
                 drowsiness_percentage = (proc.drowsy_frames / total) * 100
@@ -726,17 +726,14 @@ if webrtc_ctx and webrtc_ctx.video_processor:
             )
 
             if alarm_req:
-                st.session_state["alarm_trigger"] = True
+                st.session_state["alarm_html"] = play_alert_html()
                 with proc.lock:
                     proc.alarm_play_request = False
 
     threading.Thread(target=update_metrics, daemon=True).start()
 
-# ----------------------------
-# Browser Alarm Playback
-# ----------------------------
-if st.session_state.get("alarm_trigger", False):
-    if ALERT_WAV_B64:
-        st.audio(base64.b64decode(ALERT_WAV_B64), format="audio/wav", autoplay=True)
-    st.session_state["alarm_trigger"] = False
+# Render autoplay HTML if needed
+if st.session_state["alarm_html"]:
+    st.markdown(st.session_state["alarm_html"], unsafe_allow_html=True)
+
 
