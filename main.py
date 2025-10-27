@@ -475,9 +475,10 @@ RTC_CONFIGURATION = RTCConfiguration(
 
 webrtc_streamer(
     key="drowsiness",
-    mode=WebRtcMode.RECVONLY,  # <-- use enum, not string
+    mode=WebRtcMode.SENDRECV,   # <-- the browser sends video; processor returns frames
     video_processor_factory=VideoProcessor,
     rtc_configuration=RTC_CONFIGURATION,
     media_stream_constraints={"video": True, "audio": False},
 )
+
 
