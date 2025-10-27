@@ -506,17 +506,17 @@ BLINK_ALERT_THRESHOLD = 30
 ALERT_WAV = "alert.wav"
 
 # ----------------------------
-# Load alert sound
+# Load alert sound (base64)
 # ----------------------------
 try:
     with open(ALERT_WAV, "rb") as f:
         ALERT_WAV_B64 = base64.b64encode(f.read()).decode()
 except FileNotFoundError:
-    st.error(f"⚠️ Missing '{ALERT_WAV}'. Please add it to your project folder.")
     ALERT_WAV_B64 = None
+    st.error(f"⚠️ Missing '{ALERT_WAV}'. Please add it to your project folder.")
 
 def play_alert_html(loop=True):
-    """Return HTML for looping audio playback."""
+    """Return HTML that triggers autoplaying alarm in browser."""
     if not ALERT_WAV_B64:
         return ""
     loop_attr = "loop" if loop else ""
@@ -534,7 +534,7 @@ LEFT_EYE_IDX = [33, 160, 158, 133, 153, 144]
 RIGHT_EYE_IDX = [362, 385, 387, 263, 373, 380]
 
 # ----------------------------
-# Drowsiness Processor
+# Video processor
 # ----------------------------
 class DrowsinessProcessor(VideoProcessorBase):
     def __init__(self):
@@ -649,7 +649,6 @@ class DrowsinessProcessor(VideoProcessorBase):
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-
 # ----------------------------
 # Streamlit UI
 # ----------------------------
@@ -668,11 +667,11 @@ if "show_feed" not in st.session_state:
 if "alarm_active" not in st.session_state:
     st.session_state["alarm_active"] = False
 
-col1, col2, col3 = st.columns([1, 1, 2])
+col1, col2, col3 = st.columns([1, 1, 1])
 with col1:
-    start_btn = st.button("Start Detection")
+    start_btn = st.button("▶ Start Detection")
 with col2:
-    stop_btn = st.button("Stop Detection")
+    stop_btn = st.button("⏹ Stop Detection")
 with col3:
     stop_alarm_btn = st.button("🔇 Stop Alarm")
 
@@ -683,12 +682,10 @@ if stop_btn:
     st.session_state["show_feed"] = False
     st.session_state["alarm_active"] = False
     st.rerun()
-
 if stop_alarm_btn:
     st.session_state["alarm_active"] = False
     st.rerun()
 
-# Stream video
 webrtc_ctx = None
 if st.session_state["show_feed"]:
     webrtc_ctx = webrtc_streamer(
@@ -700,48 +697,14 @@ if st.session_state["show_feed"]:
         async_processing=True,
     )
 
-# if webrtc_ctx and webrtc_ctx.video_processor:
-#     proc = webrtc_ctx.video_processor
-#     metrics_placeholder = st.empty()
-#     audio_placeholder = st.empty()
+metrics_placeholder = st.empty()
+audio_placeholder = st.empty()
 
-#     def update_metrics():
-#         while True:
-#             time.sleep(0.3)
-#             if not webrtc_ctx.state.playing or not webrtc_ctx.video_processor:
-#                 break
-#             with proc.lock:
-#                 total = proc.total_frames if proc.total_frames > 0 else 1
-#                 drowsiness_percentage = (proc.drowsy_frames / total) * 100
-#                 blink_count = proc.blink_count
-#                 ear_val = proc.ear
-#                 alarm_req = proc.alarm_play_request
-#                 alarm_on = proc.alarm_on
-
-#             metrics_placeholder.markdown(
-#                 f"**EAR:** {ear_val:.3f}  \n"
-#                 f"**Blinks (1m):** {blink_count}  \n"
-#                 f"**Drowsiness %:** {drowsiness_percentage:.2f}%  \n"
-#                 f"**Alarm:** {'🚨 ON' if alarm_on else 'OFF'}"
-#             )
-
-#             # Loop alarm while eyes remain closed
-#             if alarm_req or (alarm_on and st.session_state["alarm_active"]):
-#                 st.session_state["alarm_active"] = True
-#                 audio_placeholder.markdown(play_alert_html(loop=True), unsafe_allow_html=True)
-#             else:
-#                 audio_placeholder.empty()
-#                 st.session_state["alarm_active"] = False
-
-#             with proc.lock:
-#                 proc.alarm_play_request = False
-
+# ----------------------------
+# Safe update loop (main thread)
+# ----------------------------
 if webrtc_ctx and webrtc_ctx.video_processor:
     proc = webrtc_ctx.video_processor
-    metrics_placeholder = st.empty()
-    audio_placeholder = st.empty()
-
-    # Streamlit-safe loop (no threads)
     while webrtc_ctx.state.playing:
         time.sleep(0.3)
         with proc.lock:
@@ -752,7 +715,6 @@ if webrtc_ctx and webrtc_ctx.video_processor:
             alarm_req = proc.alarm_play_request
             alarm_on = proc.alarm_on
 
-        # Update UI (safe inside Streamlit loop)
         metrics_placeholder.markdown(
             f"**EAR:** {ear_val:.3f}  \n"
             f"**Blinks (1m):** {blink_count}  \n"
@@ -760,18 +722,17 @@ if webrtc_ctx and webrtc_ctx.video_processor:
             f"**Alarm:** {'🚨 ON' if alarm_on else 'OFF'}"
         )
 
-        # Play looping alarm
-        if (alarm_req or (alarm_on and st.session_state.get('alarm_active', False))) and ALERT_WAV_B64:
-            st.session_state['alarm_active'] = True
+        # trigger alarm playback safely in main thread
+        if (alarm_req or alarm_on) and ALERT_WAV_B64 and not st.session_state["alarm_active"]:
+            st.session_state["alarm_active"] = True
             audio_placeholder.markdown(play_alert_html(loop=True), unsafe_allow_html=True)
-        else:
+
+        if not alarm_on and st.session_state["alarm_active"]:
+            st.session_state["alarm_active"] = False
             audio_placeholder.empty()
-            st.session_state['alarm_active'] = False
 
         with proc.lock:
             proc.alarm_play_request = False
 
-        st.rerun()
-
-
-    threading.Thread(target=update_metrics, daemon=True).start()
+        time.sleep(0.2)
+        st.experimental_rerun()
