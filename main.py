@@ -736,7 +736,7 @@ if st.session_state["show_feed"]:
 #             with proc.lock:
 #                 proc.alarm_play_request = False
 
-    if webrtc_ctx and webrtc_ctx.video_processor:
+if webrtc_ctx and webrtc_ctx.video_processor:
     proc = webrtc_ctx.video_processor
     metrics_placeholder = st.empty()
     audio_placeholder = st.empty()
