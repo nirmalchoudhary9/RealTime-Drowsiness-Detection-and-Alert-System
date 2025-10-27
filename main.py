@@ -735,4 +735,4 @@ if webrtc_ctx and webrtc_ctx.video_processor:
             proc.alarm_play_request = False
 
         time.sleep(0.2)
-        st.experimental_rerun()
+        st.rerun()
