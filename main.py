@@ -178,53 +178,45 @@
 #     cv2.destroyAllWindows()
 
 # app.py
+
 import streamlit as st
 from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration
-import av
 import cv2
-import dlib
 import numpy as np
-from scipy.spatial import distance as dist
-import json
+import mediapipe as mp
 import time
+from scipy.spatial import distance as dist
 from pathlib import Path
 
 st.set_page_config(page_title="🚗 Drowsiness Detection", layout="wide")
 
-# Path to dlib's predictor (place file in the same folder)
-PREDICTOR_PATH = "shape_predictor_68_face_landmarks.dat"
-ALARM_WAV_PATH = "Alert.wav"  
-
 # EAR and timing parameters
 EAR_THRESHOLD = 0.25
-ALARM_TRIGGER_TIME = 5.0      
+ALARM_TRIGGER_TIME = 5.0
 BLINK_MIN_DURATION = 0.1
 BLINK_MAX_DURATION = 0.4
-BLINK_ALERT_THRESHOLD = 30   
+BLINK_ALERT_THRESHOLD = 30
+ALARM_WAV_PATH = "Alert.wav"
 
-# WebRTC configuration (use public STUN)
 RTC_CONFIGURATION = RTCConfiguration(
     {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
 )
 
+mp_face_mesh = mp.solutions.face_mesh
+
+# EAR calculation
 def calculate_ear(eye):
     A = dist.euclidean(eye[1], eye[5])
     B = dist.euclidean(eye[2], eye[4])
     C = dist.euclidean(eye[0], eye[3])
-    ear = (A + B) / (2.0 * C) if C != 0 else 0
-    return ear
+    return (A + B) / (2.0 * C) if C != 0 else 0
+
 
 class DrowsinessTransformer(VideoTransformerBase):
     def __init__(self):
-        # Load dlib model once
-        if not Path(PREDICTOR_PATH).exists():
-            raise FileNotFoundError(f"{PREDICTOR_PATH} not found. Please add it to the app root.")
-        self.detector = dlib.get_frontal_face_detector()
-        self.predictor = dlib.shape_predictor(PREDICTOR_PATH)
-
-        self.LEFT_EYE = list(range(36, 42))
-        self.RIGHT_EYE = list(range(42, 48))
-
+        self.face_mesh = mp_face_mesh.FaceMesh(
+            max_num_faces=1, refine_landmarks=True, min_detection_confidence=0.5, min_tracking_confidence=0.5
+        )
         self.eyes_closed_start_time = None
         self.drowsy_frames = 0
         self.total_frames = 0
@@ -237,22 +229,22 @@ class DrowsinessTransformer(VideoTransformerBase):
         self.latest_alarm = False
         self.latest_blinks = 0
 
-    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+        # Mediapipe indexes for eyes
+        self.LEFT_EYE_IDX = [33, 160, 158, 133, 153, 144]
+        self.RIGHT_EYE_IDX = [362, 385, 387, 263, 373, 380]
+
+    def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        results = self.face_mesh.process(rgb)
 
-        faces = self.detector(gray)
+        if results.multi_face_landmarks:
+            face_landmarks = results.multi_face_landmarks[0]
+            h, w, _ = img.shape
+            landmarks = np.array([[int(p.x * w), int(p.y * h)] for p in face_landmarks.landmark])
 
-        if len(faces) > 0:
-            face = faces[0]  # single face for simplicity
-            x, y, w, h = (face.left(), face.top(), face.width(), face.height())
-            cv2.rectangle(img, (x, y), (x + w, y + h), (255, 0, 0), 2)
-
-            landmarks = self.predictor(gray, face)
-            landmarks = np.array([[p.x, p.y] for p in landmarks.parts()])
-
-            left_eye = landmarks[self.LEFT_EYE]
-            right_eye = landmarks[self.RIGHT_EYE]
+            left_eye = landmarks[self.LEFT_EYE_IDX]
+            right_eye = landmarks[self.RIGHT_EYE_IDX]
 
             left_ear = calculate_ear(left_eye)
             right_ear = calculate_ear(right_eye)
@@ -264,23 +256,21 @@ class DrowsinessTransformer(VideoTransformerBase):
             if ear < EAR_THRESHOLD:
                 if self.eyes_closed_start_time is None:
                     self.eyes_closed_start_time = time.time()
+                elapsed = time.time() - self.eyes_closed_start_time
 
-                elapsed_time = time.time() - self.eyes_closed_start_time
-
-                if elapsed_time > BLINK_MIN_DURATION and elapsed_time <= BLINK_MAX_DURATION and not self.blink_in_progress:
+                if elapsed > BLINK_MIN_DURATION and elapsed <= BLINK_MAX_DURATION and not self.blink_in_progress:
                     self.blink_count += 1
                     self.blink_in_progress = True
 
-                if elapsed_time > BLINK_MAX_DURATION:
+                if elapsed > BLINK_MAX_DURATION:
                     self.drowsy_frames += 1
 
-                if elapsed_time >= ALARM_TRIGGER_TIME and not self.alarm_on:
+                if elapsed >= ALARM_TRIGGER_TIME and not self.alarm_on:
                     self.alarm_on = True
             else:
                 if self.eyes_closed_start_time is not None:
-                    elapsed_time = time.time() - self.eyes_closed_start_time
-                    # ignore natural short blinks
-                    if not (elapsed_time > BLINK_MIN_DURATION and elapsed_time <= BLINK_MAX_DURATION):
+                    elapsed = time.time() - self.eyes_closed_start_time
+                    if not (elapsed > BLINK_MIN_DURATION and elapsed <= BLINK_MAX_DURATION):
                         self.eyes_closed_start_time = None
                 self.blink_in_progress = False
                 if self.alarm_on:
@@ -297,8 +287,10 @@ class DrowsinessTransformer(VideoTransformerBase):
             if self.blink_count > BLINK_ALERT_THRESHOLD:
                 cv2.putText(img, "YOU ARE FALLING ASLEEP!", (10, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
-            cv2.putText(img, f"Drowsiness: {drowsiness_percentage:.2f}%", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
-            cv2.putText(img, f"Blinks: {self.blink_count}", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
+            cv2.putText(img, f"Drowsiness: {drowsiness_percentage:.2f}%", (10, 60),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            cv2.putText(img, f"Blinks: {self.blink_count}", (10, 90),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
             self.latest_drowsiness = drowsiness_percentage
             self.latest_alarm = self.alarm_on
@@ -307,20 +299,18 @@ class DrowsinessTransformer(VideoTransformerBase):
             self.total_frames += 1
             self.latest_alarm = False
 
-        return av.VideoFrame.from_ndarray(img, format="bgr24")
+        return frame.from_ndarray(img, format="bgr24")
+
 
 st.title("🚗 Real-Time Drowsiness Detection (Streamlit + WebRTC)")
-st.markdown(
-    """
-    This demo uses `streamlit-webrtc` to access your browser webcam and detect drowsiness (EAR-based).
-    - Ensure `shape_predictor_68_face_landmarks.dat` is in the app folder.
-    - Place `alert.wav` (short beep) in the app folder to hear alarms.
-    """
-)
+st.markdown("""
+This demo uses `streamlit-webrtc` + `mediapipe` for real-time drowsiness detection via webcam.
+- Works fully on Streamlit Cloud (no `dlib` needed).
+- Detects drowsiness based on Eye Aspect Ratio (EAR).
+""")
 
 cols = st.columns([3, 1])
 with cols[0]:
-    # Webrtc streamer
     webrtc_ctx = webrtc_streamer(
         key="drowsiness",
         rtc_configuration=RTC_CONFIGURATION,
@@ -328,6 +318,7 @@ with cols[0]:
         media_stream_constraints={"video": True, "audio": False},
         async_transform=True,
     )
+
 with cols[1]:
     st.markdown("### Live Status")
     status_placeholder = st.empty()
