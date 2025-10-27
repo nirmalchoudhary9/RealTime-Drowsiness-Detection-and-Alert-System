@@ -515,17 +515,16 @@ except FileNotFoundError:
     st.error(f"⚠️ Missing '{ALERT_WAV}'. Please add it to your project folder.")
     ALERT_WAV_B64 = None
 
-
-def play_alert_html():
-    """Return HTML for autoplay audio playback."""
+def play_alert_html(loop=True):
+    """Return HTML for looping audio playback."""
     if not ALERT_WAV_B64:
         return ""
+    loop_attr = "loop" if loop else ""
     return f"""
-    <audio autoplay>
+    <audio autoplay {loop_attr}>
         <source src="data:audio/wav;base64,{ALERT_WAV_B64}" type="audio/wav">
     </audio>
     """
-
 
 # ----------------------------
 # Mediapipe setup
@@ -533,7 +532,6 @@ def play_alert_html():
 mp_face_mesh = mp.solutions.face_mesh
 LEFT_EYE_IDX = [33, 160, 158, 133, 153, 144]
 RIGHT_EYE_IDX = [362, 385, 387, 263, 373, 380]
-
 
 # ----------------------------
 # Drowsiness Processor
@@ -661,14 +659,14 @@ RTC_CONFIGURATION = RTCConfiguration(
 
 st.title("🚗 Real-Time Drowsiness Detection (WebRTC)")
 st.markdown("""
-This app monitors your eyes in real-time to detect drowsiness using your webcam.  
-🔊 Alarm will sound if your eyes stay closed too long.
+👁️ **Keep your eyes on the road!**  
+This app monitors your eyes using your webcam and plays an alarm if you stay drowsy too long.
 """)
 
 if "show_feed" not in st.session_state:
     st.session_state["show_feed"] = False
-if "alarm_html" not in st.session_state:
-    st.session_state["alarm_html"] = ""
+if "alarm_active" not in st.session_state:
+    st.session_state["alarm_active"] = False
 
 col1, col2, col3 = st.columns([1, 1, 2])
 with col1:
@@ -676,13 +674,18 @@ with col1:
 with col2:
     stop_btn = st.button("Stop Detection")
 with col3:
-    reset_btn = st.button("Reset Metrics")
+    stop_alarm_btn = st.button("🔇 Stop Alarm")
 
 if start_btn:
     st.session_state["show_feed"] = True
     st.rerun()
 if stop_btn:
     st.session_state["show_feed"] = False
+    st.session_state["alarm_active"] = False
+    st.rerun()
+
+if stop_alarm_btn:
+    st.session_state["alarm_active"] = False
     st.rerun()
 
 # Stream video
@@ -699,10 +702,6 @@ if st.session_state["show_feed"]:
 
 if webrtc_ctx and webrtc_ctx.video_processor:
     proc = webrtc_ctx.video_processor
-    if reset_btn:
-        proc.reset_metrics()
-        st.info("Metrics reset.")
-
     metrics_placeholder = st.empty()
     audio_placeholder = st.empty()
 
@@ -717,23 +716,24 @@ if webrtc_ctx and webrtc_ctx.video_processor:
                 blink_count = proc.blink_count
                 ear_val = proc.ear
                 alarm_req = proc.alarm_play_request
+                alarm_on = proc.alarm_on
 
             metrics_placeholder.markdown(
                 f"**EAR:** {ear_val:.3f}  \n"
                 f"**Blinks (1m):** {blink_count}  \n"
                 f"**Drowsiness %:** {drowsiness_percentage:.2f}%  \n"
-                f"**Alarm:** {'🚨 ON' if proc.alarm_on else 'OFF'}"
+                f"**Alarm:** {'🚨 ON' if alarm_on else 'OFF'}"
             )
 
-            if alarm_req:
-                st.session_state["alarm_html"] = play_alert_html()
-                with proc.lock:
-                    proc.alarm_play_request = False
+            # Loop alarm while eyes remain closed
+            if alarm_req or (alarm_on and st.session_state["alarm_active"]):
+                st.session_state["alarm_active"] = True
+                audio_placeholder.markdown(play_alert_html(loop=True), unsafe_allow_html=True)
+            else:
+                audio_placeholder.empty()
+                st.session_state["alarm_active"] = False
+
+            with proc.lock:
+                proc.alarm_play_request = False
 
     threading.Thread(target=update_metrics, daemon=True).start()
-
-# Render autoplay HTML if needed
-if st.session_state["alarm_html"]:
-    st.markdown(st.session_state["alarm_html"], unsafe_allow_html=True)
-
-
