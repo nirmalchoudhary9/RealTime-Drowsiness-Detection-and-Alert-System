@@ -193,8 +193,7 @@ EAR_THRESHOLD = 0.25
 ALARM_TRIGGER_TIME = 5       # seconds eyes closed to trigger alarm
 BLINK_MIN_DURATION = 0.1
 BLINK_MAX_DURATION = 0.4
-
-ALARM_FILE = "alert.wav"     # must exist in repo root
+ALARM_FILE = "alert.wav"
 
 LEFT_EYE = [33, 160, 158, 133, 153, 144]
 RIGHT_EYE = [362, 385, 387, 263, 373, 380]
@@ -208,11 +207,11 @@ st.set_page_config(page_title="Real-Time Drowsiness Detection", layout="wide")
 st.title("🚗 Real-Time Drowsiness Detection (Streamlit Cloud)")
 
 st.markdown("""
-This app uses **MediaPipe Face Mesh** and **streamlit-webrtc** to detect drowsiness in real time.
-It measures **Eye Aspect Ratio (EAR)** and raises an alarm if eyes remain closed for too long.
+This app uses **MediaPipe FaceMesh** and **Streamlit-WebRTC** to detect drowsiness in real time.  
+It calculates **Eye Aspect Ratio (EAR)** and plays an alarm if your eyes stay closed for too long.
 """)
 
-# ---------------- ALARM LOADING ----------------
+# ---------------- UTILITIES ----------------
 def get_audio_data_uri(path):
     try:
         with open(path, "rb") as f:
@@ -224,7 +223,6 @@ def get_audio_data_uri(path):
 
 ALARM_AUDIO_URI = get_audio_data_uri(ALARM_FILE)
 
-# ---------------- EAR CALCULATION ----------------
 def calculate_ear(eye_pts):
     A = dist.euclidean(eye_pts[1], eye_pts[5])
     B = dist.euclidean(eye_pts[2], eye_pts[4])
@@ -318,19 +316,16 @@ with col1:
     if "run_detection" not in st.session_state:
         st.session_state.run_detection = False
 
-    start_button = st.button("Start Detection")
-    stop_button = st.button("Stop Detection")
-
-    if start_button:
+    if st.button("Start Detection"):
         st.session_state.run_detection = True
-    if stop_button:
+    if st.button("Stop Detection"):
         st.session_state.run_detection = False
 
     st.markdown("### Alarm Sound")
     if ALARM_AUDIO_URI:
         st.success("Alarm file loaded.")
     else:
-        st.warning("Alarm file missing. Upload alert.wav to project root.")
+        st.warning("⚠️ Missing alert.wav in repo root!")
 
 with col2:
     st.markdown("### Live Camera")
@@ -346,32 +341,40 @@ with col2:
 metrics_box = st.empty()
 alarm_audio_box = st.empty()
 
-def render_metrics():
-    if not webrtc_ctx or not webrtc_ctx.state.playing or not webrtc_ctx.video_processor:
-        metrics_box.info("Waiting for live video feed...")
-        return
+# ---------------- LIVE METRICS LOOP ----------------
+import threading
 
-    processor = webrtc_ctx.video_processor
-    drowsiness = (processor.drowsy_frames / processor.total_frames * 100
-                  if processor.total_frames > 0 else 0.0)
+def update_metrics():
+    while True:
+        if not webrtc_ctx or not webrtc_ctx.state.playing or not webrtc_ctx.video_processor:
+            time.sleep(1)
+            continue
 
-    metrics_box.markdown(
-        f"""
-        **EAR:** {processor.eyes_closed_start_time if processor.eyes_closed_start_time else 0:.2f}  
-        **Blinks:** {processor.blink_count}  
-        **Drowsiness %:** {drowsiness:.2f}%  
-        **Alarm:** {'ON' if processor.alarm_on else 'OFF'}
-        """
-    )
+        processor = webrtc_ctx.video_processor
+        drowsiness = (processor.drowsy_frames / processor.total_frames * 100
+                      if processor.total_frames > 0 else 0.0)
 
-    if processor.alarm_on and ALARM_AUDIO_URI:
-        alarm_audio_box.markdown(
-            f'<audio autoplay><source src="{ALARM_AUDIO_URI}" type="audio/wav"></audio>',
-            unsafe_allow_html=True,
+        metrics_box.markdown(
+            f"""
+            **EAR:** {processor.eyes_closed_start_time if processor.eyes_closed_start_time else 0:.2f}  
+            **Blinks:** {processor.blink_count}  
+            **Drowsiness %:** {drowsiness:.2f}%  
+            **Alarm:** {'ON' if processor.alarm_on else 'OFF'}
+            """
         )
-    else:
-        alarm_audio_box.empty()
 
-# Live metrics refresh loop
-if webrtc_ctx and webrtc_ctx.state.playing:
-    render_metrics()
+        if processor.alarm_on and ALARM_AUDIO_URI:
+            alarm_audio_box.markdown(
+                f'<audio autoplay><source src="{ALARM_AUDIO_URI}" type="audio/wav"></audio>',
+                unsafe_allow_html=True,
+            )
+        else:
+            alarm_audio_box.empty()
+
+        time.sleep(1)
+
+# Start metrics auto-refresh in background
+if "metrics_thread" not in st.session_state:
+    thread = threading.Thread(target=update_metrics, daemon=True)
+    thread.start()
+    st.session_state.metrics_thread = thread
