@@ -382,6 +382,7 @@
 
 import streamlit as st
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
+from streamlit_webrtc import WebRtcMode
 import cv2
 import numpy as np
 import mediapipe as mp
@@ -474,8 +475,9 @@ RTC_CONFIGURATION = RTCConfiguration(
 
 webrtc_streamer(
     key="drowsiness",
-    mode="recvonly",
+    mode=WebRtcMode.RECVONLY,  # <-- use enum, not string
     video_processor_factory=VideoProcessor,
     rtc_configuration=RTC_CONFIGURATION,
     media_stream_constraints={"video": True, "audio": False},
 )
+
